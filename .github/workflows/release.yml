@@ -102,6 +102,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Compose release notes (upstream notes + fork appendix)
+        id: notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM: stumptowndoug/shep
@@ -140,6 +141,14 @@ jobs:
           echo "----- RELEASE_NOTES.md -----"
           cat RELEASE_NOTES.md
 
+          # Hand the composed notes to the release step (multiline step output),
+          # so the release is published with its notes in one shot.
+          {
+            echo "body<<__NOTES_EOF__"
+            cat RELEASE_NOTES.md
+            echo "__NOTES_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       # Only export the Apple signing vars when they are actually configured.
       # The Tauri bundler treats a present-but-empty APPLE_CERTIFICATE as "sign
       # me" and fails on `security import`, so unset secrets must not reach it —
@@ -174,7 +183,7 @@ jobs:
           emit APPLE_PASSWORD "$APPLE_PASSWORD"
           emit APPLE_TEAM_ID "$APPLE_TEAM_ID"
 
-      - name: Build, sign & create draft release
+      - name: Build, sign & publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,15 +194,9 @@ jobs:
         with:
           tagName: ${{ steps.meta.outputs.tag }}
           releaseName: shep ${{ steps.meta.outputs.tag }}
-          releaseDraft: true
+          # Published directly with the composed notes — no draft-then-edit,
+          # since a draft release can't be looked up by tag for a later edit.
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
           prerelease: false
           args: --target aarch64-apple-darwin
-
-      - name: Attach notes & publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release edit "${{ steps.meta.outputs.tag }}" \
-            --notes-file RELEASE_NOTES.md \
-            --draft=false \
-            --latest
