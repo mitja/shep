@@ -1,0 +1,165 @@
+name: Release
+
+# Cuts a GitHub release for the fork and publishes the built macOS artifacts
+# (signed .dmg, the updater .app.tar.gz + .sig, and latest.json). The updater
+# in tauri.conf.json points at this fork's releases, so a published release is
+# what installed apps auto-update from.
+#
+# Trigger: push a version tag (e.g. `git tag v0.5.1 && git push origin v0.5.1`),
+# or run manually via "Run workflow" and supply the tag.
+#
+# Required repo secret:
+#   TAURI_SIGNING_PRIVATE_KEY           updater signing key (this fork's key)
+# Optional (empty password key -> set to ""):
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# Optional — Apple Developer ID signing + notarization (unset => ad-hoc build,
+# which runs but shows a Gatekeeper warning on first open):
+#   APPLE_CERTIFICATE                   base64 of the Developer ID .p12
+#   APPLE_CERTIFICATE_PASSWORD          password for that .p12
+#   APPLE_SIGNING_IDENTITY              e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID                            Apple account email
+#   APPLE_PASSWORD                      app-specific password for notarization
+#   APPLE_TEAM_ID                       10-char team id
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.5.1)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Apple-silicon runner: builds a native aarch64 bundle, matching the
+    # existing local release process and the darwin-aarch64 updater target.
+    runs-on: macos-14
+    steps:
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (full history for changelog)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag matches app version
+        run: |
+          CONF_VER=$(jq -r .version src-tauri/tauri.conf.json)
+          if [ "${{ steps.meta.outputs.version }}" != "$CONF_VER" ]; then
+            echo "::error::Tag ${{ steps.meta.outputs.tag }} does not match tauri.conf.json version v$CONF_VER."
+            echo "Bump the version (scripts/bump-version.sh) and tag the bump commit."
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compose release notes (upstream notes + fork appendix)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM: stumptowndoug/shep
+        run: |
+          set -euo pipefail
+
+          # Base: the upstream project's latest release body, copied verbatim.
+          if UP_JSON=$(gh release view --repo "$UPSTREAM" --json tagName,body 2>/dev/null); then
+            UP_TAG=$(jq -r '.tagName' <<<"$UP_JSON")
+            UP_BODY=$(jq -r '.body' <<<"$UP_JSON")
+          else
+            UP_TAG=""
+            UP_BODY="_(upstream release notes were unavailable when this build ran)_"
+          fi
+
+          # Appendix: commits this fork carries on top of that upstream release.
+          git remote add upstream "https://github.com/${UPSTREAM}.git" 2>/dev/null || true
+          git fetch --tags --quiet upstream || true
+          if [ -n "$UP_TAG" ] && git rev-parse -q --verify "refs/tags/${UP_TAG}^{commit}" >/dev/null; then
+            COMMITS=$(git log --no-merges --pretty='- %s (%h)' "${UP_TAG}..HEAD" || true)
+            BASELINE="upstream ${UP_TAG}"
+          else
+            COMMITS=$(git log --no-merges --pretty='- %s (%h)' -n 20 || true)
+            BASELINE="recent history"
+          fi
+          [ -z "$COMMITS" ] && COMMITS="- (no additional commits)"
+
+          {
+            printf '%s\n\n' "$UP_BODY"
+            printf -- '---\n\n'
+            printf '### Fork additions — %s\n\n' "$GITHUB_REPOSITORY"
+            printf 'Built on %s, plus:\n\n' "$BASELINE"
+            printf '%s\n' "$COMMITS"
+          } > RELEASE_NOTES.md
+
+          echo "----- RELEASE_NOTES.md -----"
+          cat RELEASE_NOTES.md
+
+      - name: Build, sign & create draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (required for latest.json + .sig).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple Developer ID signing + notarization (optional; empty => skipped).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: shep ${{ steps.meta.outputs.tag }}
+          releaseDraft: true
+          prerelease: false
+          args: --target aarch64-apple-darwin
+
+      - name: Attach notes & publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ steps.meta.outputs.tag }}" \
+            --notes-file RELEASE_NOTES.md \
+            --draft=false \
+            --latest
