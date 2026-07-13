@@ -296,6 +296,13 @@ pub fn kill_pty(pty_id: u32, pty_manager: State<'_, PtyManager>) -> Result<(), S
     pty_manager.kill(pty_id)
 }
 
+/// Drop a session whose process already exited on its own, freeing its PTY fd.
+/// Called from the frontend when it receives the PTY `exit` event.
+#[tauri::command]
+pub fn reap_pty(pty_id: u32, pty_manager: State<'_, PtyManager>) {
+    pty_manager.reap(pty_id);
+}
+
 // ── App lifecycle commands ────────────────────────────────────────
 
 #[tauri::command]

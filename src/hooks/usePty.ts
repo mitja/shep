@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { spawnPty, killPty, getDefaultShell } from "../lib/tauri";
+import { spawnPty, killPty, reapPty, getDefaultShell } from "../lib/tauri";
 import { useThemeStore } from "../stores/useThemeStore";
 import { hexLuminance } from "../lib/themes";
 import type { PtyOutput, CommandConfig, SessionMode } from "../lib/types";
@@ -167,6 +167,10 @@ export function usePty() {
         }, ACTIVITY_TIMEOUT));
       } else if (msg.event === "exit") {
         cleanupActivityState(ptyId);
+        // The process ended on its own — free the backend session so its PTY
+        // file descriptor isn't held until the tab is manually closed. Harmless
+        // no-op when the exit was triggered by killPty (session already gone).
+        void reapPty(ptyId);
         setTabExited(ptyId, msg.data.code);
         const stoppedByUser = stoppingPtys.delete(ptyId);
         if (commandName) {

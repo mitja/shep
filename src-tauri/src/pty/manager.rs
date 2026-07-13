@@ -87,6 +87,19 @@ impl PtyManager {
         }
     }
 
+    /// Remove a session whose process has already exited on its own, freeing
+    /// the PTY master file descriptor it holds. Unlike `kill`, this sends no
+    /// signals — the child has already terminated and been waited on by the
+    /// reader thread, so dropping the session is all that's required.
+    ///
+    /// Without this, a session is only ever removed on an explicit `kill`, so
+    /// any terminal whose process exits by itself (a finished one-shot command,
+    /// a crashed dev server, `exit` typed at a shell) while its tab is left
+    /// open would leak its `PtySession` and open fd for the lifetime of the app.
+    pub fn reap(&self, pty_id: u32) {
+        self.sessions.lock().unwrap().remove(&pty_id);
+    }
+
     pub fn child_pids(&self) -> Vec<u32> {
         self.sessions.lock().unwrap().values().filter_map(|s| s.pid()).collect()
     }
