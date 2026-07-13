@@ -15,8 +15,20 @@ import { getErrorMessage } from "../lib/errors";
 // Map ptyId -> xterm instance for writing output
 const terminalInstances = new Map<number, Terminal>();
 
-// Buffer for PTY output that arrives before terminal is registered
+// Buffer for PTY output that arrives before terminal is registered.
+// Capped per pty (see PENDING_OUTPUT_CAP) so a streaming background tab that is
+// never brought into view can't grow this buffer without bound — only the most
+// recent output is kept, mirroring the trimming xterm's scrollback would apply
+// once the buffer is eventually flushed into the terminal.
 const pendingOutput = new Map<number, string[]>();
+// Running character total per pty, so trimming to the cap is O(1) amortized
+// instead of re-summing the whole buffer on every write.
+const pendingOutputSize = new Map<number, number>();
+
+// Max buffered characters per unviewed pty (~2 MB). Generous enough to preserve
+// a full-screen TUI redraw plus recent scrollback, bounded so idle background
+// tabs (e.g. autostart dev servers) can't leak memory indefinitely.
+const PENDING_OUTPUT_CAP = 2_000_000;
 
 // Batch buffer for coalescing rapid PTY writes into single animation frames.
 // Prevents screen tearing when TUI apps (Claude Code, opencode) send screen
@@ -53,12 +65,14 @@ export function flushPendingOutput(ptyId: number) {
   if (buffered) {
     term.write(buffered.join(""));
     pendingOutput.delete(ptyId);
+    pendingOutputSize.delete(ptyId);
   }
 }
 
 export function unregisterTerminal(ptyId: number) {
   terminalInstances.delete(ptyId);
   pendingOutput.delete(ptyId);
+  pendingOutputSize.delete(ptyId);
   writeBatch.delete(ptyId);
   writeBatchScheduled.delete(ptyId);
 }
@@ -87,13 +101,24 @@ function writeToPty(ptyId: number, data: string) {
       });
     }
   } else {
-    // Terminal not mounted yet — buffer the output
+    // Terminal not mounted yet — buffer the output, keeping only the most
+    // recent PENDING_OUTPUT_CAP characters. Without this cap a background tab
+    // running a continuously-streaming process (dev server, log tailer, an
+    // autostart command the user never opens) would accumulate every byte it
+    // ever emitted, since its terminal is never registered to drain the buffer.
     let buf = pendingOutput.get(ptyId);
     if (!buf) {
       buf = [];
       pendingOutput.set(ptyId, buf);
     }
     buf.push(data);
+    let size = (pendingOutputSize.get(ptyId) ?? 0) + data.length;
+    // Drop whole chunks from the front until under the cap. Keep at least the
+    // chunk just pushed so a single oversized write is never fully discarded.
+    while (size > PENDING_OUTPUT_CAP && buf.length > 1) {
+      size -= buf.shift()!.length;
+    }
+    pendingOutputSize.set(ptyId, size);
   }
 }
 
