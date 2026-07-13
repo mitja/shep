@@ -106,6 +106,7 @@ pub fn run() {
             commands::update_pty_color_theme,
             commands::resize_pty,
             commands::kill_pty,
+            commands::reap_pty,
             commands::get_pty_session_count,
             commands::shutdown_and_quit,
             commands::get_username,

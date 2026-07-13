@@ -181,6 +181,12 @@ export function killPty(ptyId: number): Promise<void> {
   return invoke("kill_pty", { ptyId });
 }
 
+// Drop a backend PTY session whose process has already exited on its own,
+// freeing its PTY file descriptor. Distinct from killPty: no signals are sent.
+export function reapPty(ptyId: number): Promise<void> {
+  return invoke("reap_pty", { ptyId });
+}
+
 // ── App lifecycle commands ────────────────────────────────────────
 
 export function shutdownAndQuit(): Promise<void> {
