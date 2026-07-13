@@ -53,8 +53,14 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
+          VERSION="${TAG#v}"
+          # Fork tags carry a suffix so they don't collide with upstream tags
+          # (e.g. v0.5.1-mitja.1). The app version is the numeric core before
+          # the first '-'.
+          CORE="${VERSION%%-*}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "core=$CORE" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (full history for changelog)
         uses: actions/checkout@v4
@@ -62,11 +68,11 @@ jobs:
           ref: ${{ steps.meta.outputs.tag }}
           fetch-depth: 0
 
-      - name: Verify tag matches app version
+      - name: Verify tag core matches app version
         run: |
           CONF_VER=$(jq -r .version src-tauri/tauri.conf.json)
-          if [ "${{ steps.meta.outputs.version }}" != "$CONF_VER" ]; then
-            echo "::error::Tag ${{ steps.meta.outputs.tag }} does not match tauri.conf.json version v$CONF_VER."
+          if [ "${{ steps.meta.outputs.core }}" != "$CONF_VER" ]; then
+            echo "::error::Tag ${{ steps.meta.outputs.tag }} (version core ${{ steps.meta.outputs.core }}) does not match tauri.conf.json version $CONF_VER."
             echo "Bump the version (scripts/bump-version.sh) and tag the bump commit."
             exit 1
           fi
